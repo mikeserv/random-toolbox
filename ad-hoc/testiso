@@ -21,60 +21,73 @@
 
 # Accept arguments - an existing directory and a non-existing file
 # given in any order.
-while (( $# ))
-do
-  arg="$1"; shift
-  [[   -d "$arg" && -z "$DIR" ]] && declare -r DIR="$arg" && continue
-  [[ ! -e "$arg" && -z "$IMG" ]] && declare -r IMG="$arg" && continue
-  echo "Bad argument: $arg"
-  exit 1
-done
-[[ -z "$DIR" ]] && declare -r DIR=/dev/null
-[[ -z "$IMG" ]] && declare -r IMG="$(basename $0).iso"
-echo "Making image '$IMG' from directory '$DIR'"
+# while (( $# ))
+# looping over a single arg per iteration is better/portably done like
+unset DIR IMG _Bad_Argument_
+for arg do
 
-declare -r SECTOR_SIZE=2048
-declare -r START_SECTOR=16
-declare -r MAX_ED=5 #max number of ED sectors to search
-declare -r HASH=sha256
+#  automatic in for loop  
+#  arg="$1"; shift
+
+  [ -e "${arg:-${_Bad_Argument_?"''"}}/" ]
+  case $?:${DIR##*/}/:${IMG##*/} in
+  (1:*:?*|0:?*/*)
+       "${_Bad_Argument?"$arg"}";;
+  (1*) IMG=$arg;;
+  (0*) DIR=$arg;;
+  esac
+done
+readonly \
+    "DIR=${DIR-/dev/null}"    \
+    "IMG=${IMG-${0##*/}.iso}" \
+    "SECTOR_SIZE=2048"        \
+    "START_SECTOR=16"         \
+    "MAX_ED=5"                \
+    "HASH=sha256"
+
+printf "%s '%s'%b" \
+    "Making image" "$IMG" "" \
+    "from directory" "$DIR" \\n
 
 # byte to ascii hex - surely there has to be a better way?
-bytehex() { printf "%b" "${1:-\000}" | od -t x1 | { read offset hex; echo $hex; }; }
+# bytehex() { printf "%b" "${1:-\000}" | od -t x1 | { read offset hex; echo $hex; }; }
+# maybe so?
+
+bytehex(){ printf %x\\n "'$1"; }
 
 # blank config
-( for s in APPI COPY ABST BIBL PREP PUBL SYSI VOLI VOLS
-  do
-    echo -e "$s=${!s}"
-  done
-) > .mkisofsrc
+
+for s in APPI COPY ABST BIBL PREP PUBL SYSI VOLI VOLS
+do    eval "printf $s=%s \"\$$s\""
+done  > .mkisofsrc
 
 # make an empty test iso with a fake timestamp
-TZ=UTC faketime -f "1970-01-01 00:00:00" mkisofs -quiet -r -J $UDF -o "$IMG" "$DIR"
+TZ=UTC faketime -f "1970-01-01 00:00:00" mkisofs -quiet -r -J "UDF" -o "$IMG" "$DIR"
 
 # display header
 isoinfo -d -i "$IMG"
 
 # traverse volume descriptors
-echo -n "Volume descriptors"
-for ((vd_type='' sector=$START_SECTOR;vd_type!="FF";sector+=1))
-do
-  vd_type=$(bytehex $(dd if="$IMG" skip=$((sector*SECTOR_SIZE)) bs=1 count=1 2>/dev/null))
-  echo -n " $vd_type"
-done
+printf "Volume descriptors"
+
+od -tx1 -vj "$((START_SECTOR*SECTOR_SIZE))" |
+sed -ne's/.*[40]000  *\(..\).*/p'           | tr -s \\n ' '
 
 # and extended descriptors
-for ((ed=0; ed<$MAX_ED; ed++))
+ed=0
+while [ "$((ed+=1))" -lt "$MAX_ED" ]
 do
   byte_offset=$(((sector+ed)*SECTOR_SIZE))
-  id=$(dd if="$IMG" skip=$byte_offset bs=1 count=4 2>/dev/null)
-  echo -n " $id"
-  if [[ "$id" == "MKI " ]]
+  id=$(dd if="$IMG" skip="$byte_offset" bs=1 count=4 2>/dev/null)
+  printf %s " $id"
+  if [ "MKI " = "$id" ]
   then
     echo "wiping next 100 bytes to erase creation time"
-    dd if=/dev/zero of="$IMG" conv=notrunc seek=$((byte_offset+4)) bs=1 count=100 2>/dev/null
+    dd if=/dev/zero of="$IMG" conv=notrunc seek="$((byte_offset+4))" bs=1 count=100 2>/dev/null
     break
   fi
 done
 
 # display image size, hash and name
+# guess this is the only non-POSIX bit now
 stat --printf="%s bytes; $HASH:" "$IMG"; ${HASH}sum "$IMG"
